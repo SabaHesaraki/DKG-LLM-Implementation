@@ -1,0 +1,46 @@
+MODULE 4 — treatment.py
+(Treatment Recommendation + Utility Optimization)
+
+# treatment.py
+import random
+
+W1 = 1.0
+W2 = 0.5
+
+def compute_treatment_utility(dkg, treatment, disease, patient):
+    """
+    U = w1 * efficacy - w2 * risk
+    """
+    # ----- efficacy -----
+    eff = dkg.G.nodes[treatment].get("efficacy")
+    if eff is None:
+        if dkg.G.has_edge(treatment, disease):
+            eff = dkg.G[treatment][disease]['weight']
+        else:
+            eff = random.uniform(0.4, 0.8)
+
+    # ----- risk -----
+    risk = dkg.G.nodes[treatment].get("risk", 0.1)
+    if patient.get("age", 50) > 70:
+        risk *= 1.3
+
+    U = W1 * eff - W2 * risk
+    return U, eff, risk
+
+
+def recommend_treatments(dkg, disease, patient, top_k=3):
+    results = []
+
+    for n in dkg.G.nodes():
+        t = dkg.node_types.get(n)
+        if t in ["Treatment", "Medication"] or dkg.G.has_edge(n, disease):
+            U, eff, risk = compute_treatment_utility(dkg, n, disease, patient)
+            results.append({
+                "name": n,
+                "utility": U,
+                "efficacy": eff,
+                "risk": risk
+            })
+
+    results.sort(key=lambda x: x["utility"], reverse=True)
+    return results[:top_k]

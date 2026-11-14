@@ -1,0 +1,37 @@
+MODULE 3 — bayes_diagnosis.py
+(Disease Posterior Calculation)
+
+# bayes_diagnosis.py
+import math
+import numpy as np
+from scipy.special import softmax
+
+def compute_disease_posterior(dkg, symptoms, priors):
+    """
+    Computes P(d | S) ∝ P(S|d) * P(d)
+    """
+    diseases = [
+        n for n in dkg.G.nodes()
+        if dkg.node_types.get(n) == "Disease"
+    ]
+
+    scores = {}
+    for d in diseases:
+        logp = math.log(priors.get(d, 1e-3))
+
+        for s in symptoms:
+            w = 0.01
+            if dkg.G.has_edge(s, d):
+                w = dkg.G[s][d]['weight']
+            logp += math.log(w)
+
+        scores[d] = logp
+
+    if not scores:
+        return {}
+
+    labels = list(scores.keys())
+    vals = np.array(list(scores.values()))
+    probs = softmax(vals)
+
+    return dict(zip(labels, probs))

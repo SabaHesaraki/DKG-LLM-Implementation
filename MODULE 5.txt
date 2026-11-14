@@ -1,0 +1,28 @@
+MODULE 5 — initial_graph.py
+(Initial Bootstrap Clinical Knowledge Graph)
+
+# initial_graph.py
+from dkg import DynamicKnowledgeGraph
+
+def build_initial_dkg():
+    dkg = DynamicKnowledgeGraph()
+
+    nodes = [
+        ("diabetes", "Disease"),
+        ("hypertension", "Disease"),
+        ("fever", "Symptom"),
+        ("cough", "Symptom"),
+        ("infection", "Disease"),
+        ("insulin", "Treatment"),
+        ("metformin", "Medication"),
+        ("aspirin", "Medication"),
+    ]
+
+    for name, t in nodes:
+        dkg.add_node(name, t, initial_score=0.9)
+
+    dkg.add_edge("insulin", "diabetes", "Therapeutic", 0.9)
+    dkg.add_edge("metformin", "diabetes", "Therapeutic", 0.85)
+    dkg.add_edge("cough", "infection", "Diagnostic", 0.5)
+
+    return dkg

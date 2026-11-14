@@ -1,0 +1,346 @@
+# DKG-LLM ASFA Notebook (Python script with Jupyter cell markers)
+
+This file is organized with cell separators so you can open it directly
+in a Jupyter Notebook (or convert it to .ipynb). Comments are in English.
+
+Contents:
+- Mock Grok3 extractor (simulated LLM)
+- DynamicKnowledgeGraph class based on networkx
+- ASFA pipeline implementing the 5 phases from the paper
+- Bayesian diagnosis and treatment recommendation modules
+- Demo that constructs a small DKG and runs the pipeline on synthetic texts
+
+To use as a notebook: open a new Jupyter notebook, create a new cell, and
+paste the contents between `# %%` markers into separate cells or run this
+file using `%run DKG-LLM_ASFA_Jupyter_Notebook.py`.
+"""
+
+# %%
+# Imports and global hyperparameters
+import re
+import math
+import random
+from collections import defaultdict, Counter
+import networkx as nx
+import numpy as np
+from scipy.special import softmax
+
+# -----------------------------
+# Default parameters (tunable)
+# -----------------------------
+ALPHA = 1.0  # weight for Grok3 confidence
+BETA = 0.7   # weight for similarity to existing graph
+GAMMA = 0.6  # decay factor for edge weight updates
+TAU = 0.7    # pruning threshold
+W1 = 1.0     # efficacy weight in utility
+W2 = 0.5     # risk weight in utility
+MAX_EDGES = 987654  # target max edges (informational)
+
+# %%
+# Mock Grok3: a small simulated extractor that returns entities and relations
+class MockGrok3:
+    def __init__(self, entity_keywords=None, relation_patterns=None):
+        # simple mapping from token -> entity type
+        self.entity_keywords = entity_keywords or {
+            'fever': 'Symptom', 'cough': 'Symptom', 'fatigue': 'Symptom',
+            'diabetes': 'Disease', 'hypertension': 'Disease', 'infection': 'Disease',
+            'insulin': 'Treatment', 'metformin': 'Medication', 'aspirin': 'Medication',
+            'nausea': 'Symptom', 'cancer': 'Disease'
+        }
+        # simple regex patterns for relation extraction (demo only)
+        self.relation_patterns = relation_patterns or [
+            (r"(\w+) causes (\w+)", 'Causal'),
+            (r"(\w+) treats (\w+)", 'Therapeutic'),
+            (r"(\w+) associated with (\w+)", 'Associative')
+        ]
+
+    def extract(self, text, context=None):
+        """
+        Input: clinical text string
+        Output: entities list and relations list
+        entity: (name, type, score_estimate)
+        relation: (src, dst, rel_type, score_estimate)
+        """
+        text = text.lower()
+        entities = {}
+        # detect entity keywords
+        for word, etype in self.entity_keywords.items():
+            if re.search(r'\b' + re.escape(word) + r'\b', text):
+                score = 0.6 + 0.4 * (text.count(word) / max(1, len(text.split())))
+                entities[word] = (word, etype, min(score, 0.99))
+
+        relations = []
+        for patt, rtype in self.relation_patterns:
+            for m in re.finditer(patt, text):
+                a, b = m.group(1), m.group(2)
+                if a in entities and b in entities:
+                    relations.append((a, b, rtype, 0.7))
+        return list(entities.values()), relations
+
+# %%
+# DynamicKnowledgeGraph: a wrapper around networkx.DiGraph with utilities
+class DynamicKnowledgeGraph:
+    def __init__(self):
+        self.G = nx.DiGraph()
+        self.node_types = {}
+        self.node_freq = Counter()
+        self.edge_weight_default = 0.5
+
+    def add_node(self, node, ntype, initial_score=0.5):
+        if node not in self.G:
+            self.G.add_node(node)
+            self.node_types[node] = ntype
+            self.node_freq[node] += 1
+            self.G.nodes[node]['score'] = initial_score
+            self.G.nodes[node]['type'] = ntype
+        else:
+            self.node_freq[node] += 1
+            self.G.nodes[node]['score'] = min(1.0, self.G.nodes[node].get('score', 0.5) + 0.05)
+
+    def add_edge(self, src, dst, etype, weight=None):
+        if weight is None:
+            weight = self.edge_weight_default
+        if self.G.has_edge(src, dst):
+            old = self.G[src][dst].get('weight', self.edge_weight_default)
+            neww = GAMMA * old + (1 - GAMMA) * weight
+            self.G[src][dst]['weight'] = neww
+            self.G[src][dst]['type'] = etype
+        else:
+            self.G.add_edge(src, dst, weight=weight, type=etype)
+
+    def get_neighbors(self, node):
+        return list(self.G.successors(node)) + list(self.G.predecessors(node))
+
+    def prune_with_mrf(self, tau=TAU):
+        """
+        Simple MRF-based pruning:
+        - unary potential based on node frequency and stored score
+        - pairwise potential based on edge weight and neighborhood Jaccard
+        """
+        node_scores = {}
+        max_freq = max(1, max(self.node_freq.values())) if self.node_freq else 1
+        for n in self.G.nodes():
+            freq_term = self.node_freq[n] / max_freq
+            score_attr = self.G.nodes[n].get('score', 0.5)
+            unary = 0.6 * freq_term + 0.4 * score_attr
+            node_scores[n] = unary
+
+        edge_scores = {}
+        for u, v, d in self.G.edges(data=True):
+            w = d.get('weight', 0.5)
+            neigh_u = set(self.get_neighbors(u))
+            neigh_v = set(self.get_neighbors(v))
+            inter = len(neigh_u & neigh_v)
+            union = len(neigh_u | neigh_v) or 1
+            sim = inter / union
+            pairwise = 0.7 * w + 0.3 * sim
+            edge_scores[(u, v)] = pairwise
+
+        removed_nodes = []
+        removed_edges = []
+        for u, v in list(self.G.edges()):
+            if edge_scores.get((u, v), 0) < tau:
+                self.G.remove_edge(u, v)
+                removed_edges.append((u, v))
+        for n in list(self.G.nodes()):
+            if node_scores.get(n, 0) < tau:
+                self.G.remove_node(n)
+                removed_nodes.append(n)
+        return removed_nodes, removed_edges
+
+    def summary(self):
+        return {
+            'nodes': self.G.number_of_nodes(),
+            'edges': self.G.number_of_edges(),
+            'node_types': Counter(self.node_types.get(n, 'Unknown') for n in self.G.nodes())
+        }
+
+# %%
+# Bayesian disease posterior computation
+def compute_disease_posterior(dkg: DynamicKnowledgeGraph, symptoms, priors):
+    """
+    Compute P(d | S) proportional to P(S | d) P(d)
+    P(S|d) is derived from edge weights s -> d
+    """
+    diseases = [n for n in dkg.G.nodes() if dkg.node_types.get(n) == 'Disease']
+    scores = {}
+    for d in diseases:
+        logp = 0.0
+        for s in symptoms:
+            w = 0.01
+            if dkg.G.has_edge(s, d):
+                w = max(0.001, dkg.G[s][d].get('weight', 0.5))
+            logp += math.log(w)
+        prior = priors.get(d, 1e-3)
+        logp += math.log(prior)
+        scores[d] = logp
+    if not scores:
+        return {}
+    labels = list(scores.keys())
+    vals = np.array([scores[l] for l in labels])
+    probs = softmax(vals)
+    return dict(zip(labels, probs))
+
+# %%
+# Treatment utility and recommendation functions
+def compute_treatment_utility(dkg: DynamicKnowledgeGraph, treatment, disease, patient_profile, w1=W1, w2=W2):
+    # get efficacy
+    eff = dkg.G.nodes[treatment].get('efficacy', None)
+    if eff is None:
+        eff = dkg.G[treatment][disease].get('weight') if dkg.G.has_edge(treatment, disease) else random.uniform(0.4, 0.9)
+    risk = dkg.G.nodes[treatment].get('risk', None)
+    if risk is None:
+        ntype = dkg.node_types.get(treatment, 'Treatment')
+        risk = 0.1 if 'Medication' in ntype or 'Treatment' in ntype else 0.2
+    age = patient_profile.get('age', 40)
+    if age > 70:
+        risk *= 1.3
+    utility = w1 * eff - w2 * risk
+    return utility, eff, risk
+
+
+def recommend_treatments(dkg: DynamicKnowledgeGraph, disease, patient_profile, budget=None, top_k=3):
+    candidates = []
+    for n in dkg.G.nodes():
+        ntype = dkg.node_types.get(n, '')
+        if 'Treatment' in ntype or 'Medication' in ntype or dkg.G.has_edge(n, disease):
+            util, eff, risk = compute_treatment_utility(dkg, n, disease, patient_profile)
+            cost = dkg.G.nodes[n].get('cost', random.uniform(10, 200))
+            candidates.append({'name': n, 'utility': util, 'efficacy': eff, 'risk': risk, 'cost': cost})
+    candidates.sort(key=lambda x: (x['utility'] / (x['cost'] + 1e-6)), reverse=True)
+    selected = []
+    if budget is None:
+        selected = candidates[:top_k]
+    else:
+        remain = budget
+        for c in candidates:
+            if c['cost'] <= remain and c['utility'] > 0:
+                selected.append(c)
+                remain -= c['cost']
+            if len(selected) >= top_k:
+                break
+    return selected
+
+# %%
+# ASFA pipeline implementation (5 phases)
+def ASFA_pipeline(texts, dkg: DynamicKnowledgeGraph, grok: MockGrok3, priors, hyperparams=None, patient_symptoms=None, patient_profile=None):
+    alpha = (hyperparams or {}).get('alpha', ALPHA)
+    beta = (hyperparams or {}).get('beta', BETA)
+    gamma = (hyperparams or {}).get('gamma', GAMMA)
+    tau = (hyperparams or {}).get('tau', TAU)
+
+    D = [t.strip() for t in texts if t and t.strip()]
+    candidate_entities = []
+    candidate_relations = []
+
+    # Phase 2: Semantic Extraction (using MockGrok3)
+    for t in D:
+        ents, rels = grok.extract(t, context=None)
+        for (ename, etype, p_grok) in ents:
+            sim = 0.0
+            if ename in dkg.G:
+                sim = 0.9
+            else:
+                sim = 0.1
+            conf = 1 / (1 + math.exp(- (alpha * p_grok + beta * sim - 1)))
+            candidate_entities.append((ename, etype, conf))
+        for (a, b, rtype, p_rel) in rels:
+            candidate_relations.append((a, b, rtype, p_rel))
+
+    # Phase 3: Graph Update
+    for ename, etype, conf in candidate_entities:
+        if conf >= tau:
+            dkg.add_node(ename, etype, initial_score=conf)
+    for a, b, rtype, p_rel in candidate_relations:
+        if a in dkg.G and b in dkg.G and p_rel >= tau:
+            dkg.add_edge(a, b, rtype, weight=p_rel)
+
+    removed_nodes, removed_edges = dkg.prune_with_mrf(tau=tau)
+
+    # Phase 4: Reasoning and Recommendation
+    diagnoses = {}
+    treatment_recommendations = {}
+    if patient_symptoms:
+        diagnoses = compute_disease_posterior(dkg, patient_symptoms, priors)
+        for d, prob in sorted(diagnoses.items(), key=lambda x: x[1], reverse=True)[:5]:
+            recs = recommend_treatments(dkg, d, patient_profile or {}, top_k=3)
+            treatment_recommendations[d] = {'prob': prob, 'recommendations': recs}
+
+    # Phase 5: Feedback Integration (simulated placeholder)
+    feedbacks = []
+    for f in feedbacks:
+        d_true, chosen_T, accepted = f
+        if accepted and dkg.G.has_edge(chosen_T, d_true):
+            old = dkg.G[chosen_T][d_true].get('weight', 0.5)
+            dkg[chosen_T][d_true]['weight'] = min(1.0, old + 0.05)
+
+    return dkg, diagnoses, treatment_recommendations, {'removed_nodes': removed_nodes, 'removed_edges': removed_edges}
+
+# %%
+# Utility: build a small initial DKG for demonstration
+def build_initial_dkg():
+    dkg = DynamicKnowledgeGraph()
+    initial_nodes = [
+        ('diabetes', 'Disease'), ('hypertension', 'Disease'),
+        ('fever', 'Symptom'), ('cough', 'Symptom'), ('fatigue', 'Symptom'),
+        ('insulin', 'Treatment'), ('metformin', 'Medication'),
+        ('aspirin', 'Medication'), ('antibiotic', 'Treatment')
+    ]
+    for n, t in initial_nodes:
+        dkg.add_node(n, t, initial_score=0.8)
+
+    dkg.add_edge('fever', 'infection', 'Diagnostic', weight=0.6)
+    dkg.add_edge('cough', 'pneumonia', 'Diagnostic', weight=0.5)
+    dkg.add_edge('insulin', 'diabetes', 'Therapeutic', weight=0.9)
+    dkg.add_edge('metformin', 'diabetes', 'Therapeutic', weight=0.85)
+    dkg.add_edge('aspirin', 'hypertension', 'Contraindicative', weight=0.2)
+    dkg.add_edge('antibiotic', 'infection', 'Therapeutic', weight=0.8)
+
+    dkg.G.nodes['insulin']['efficacy'] = 0.9
+    dkg.G.nodes['metformin']['efficacy'] = 0.8
+    dkg.G.nodes['aspirin']['efficacy'] = 0.4
+    dkg.G.nodes['insulin']['cost'] = 120.0
+    dkg.G.nodes['metformin']['cost'] = 20.0
+    dkg.G.nodes['aspirin']['cost'] = 5.0
+    dkg.G.nodes['insulin']['risk'] = 0.15
+    dkg.G.nodes['metformin']['risk'] = 0.08
+    return dkg
+
+# %%
+# Demo main cell
+if __name__ == "__main__":
+    dkg = build_initial_dkg()
+    grok = MockGrok3()
+    texts = [
+        "Patient presents with fever and cough. Suspected infection. antibiotic treats infection.",
+        "Type 2 diabetes patient, prescribed metformin. insulin treats diabetes.",
+        "Elderly patient with fatigue and cough; possible pneumonia associated with infection."
+    ]
+    priors = {'diabetes': 0.05, 'hypertension': 0.10, 'infection': 0.08, 'pneumonia': 0.02}
+    patient_profile = {'age': 72, 'allergies': ['penicillin']}
+    patient_symptoms = ['fever', 'cough']
+
+    dkg_upd, diagnoses, treatment_recs, prune_info = ASFA_pipeline(
+        texts, dkg, grok, priors,
+        hyperparams={'alpha': 1.0, 'beta': 0.7, 'gamma': 0.6, 'tau': 0.6},
+        patient_symptoms=patient_symptoms,
+        patient_profile=patient_profile
+    )
+
+    print("=== Graph summary after ASFA ===")
+    print(dkg_upd.summary())
+    print("Removed nodes:", prune_info['removed_nodes'])
+    print("Removed edges:", prune_info['removed_edges'])
+    print()
+
+    print("=== Diagnoses (P(d|S)) ===")
+    for d, p in sorted(diagnoses.items(), key=lambda x: x[1], reverse=True):
+        print(f"{d}: {p:.4f}")
+    print()
+
+    print("=== Treatment recommendations ===")
+    for d, info in treatment_recs.items():
+        print(f"Disease: {d} (prob={info['prob']:.3f})")
+        for rec in info['recommendations']:
+            print(f"  - {rec['name']}: utility={rec['utility']:.3f}, efficacy={rec['efficacy']:.3f}, risk={rec['risk']:.3f}, cost={rec['cost']:.1f}")
+        print()

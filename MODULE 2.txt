@@ -1,0 +1,73 @@
+MODULE 2 — dkg.py
+(Dynamic Knowledge Graph + MRF Pruning)
+
+# dkg.py
+import math
+import networkx as nx
+from collections import Counter
+
+GAMMA = 0.6
+TAU = 0.7
+
+class DynamicKnowledgeGraph:
+    """
+    Dynamic Knowledge Graph with:
+    - node type tracking
+    - frequency
+    - MRF pruning
+    - edge weight decay
+    """
+
+    def __init__(self):
+        self.G = nx.DiGraph()
+        self.node_types = {}
+        self.node_freq = Counter()
+
+    def add_node(self, node, ntype, initial_score=0.5):
+        if node not in self.G:
+            self.G.add_node(node, score=initial_score, type=ntype)
+            self.node_types[node] = ntype
+            self.node_freq[node] += 1
+        else:
+            self.node_freq[node] += 1
+            self.G.nodes[node]['score'] = min(
+                1.0, self.G.nodes[node]['score'] + 0.05
+            )
+
+    def add_edge(self, src, dst, etype, weight):
+        if self.G.has_edge(src, dst):
+            old = self.G[src][dst]['weight']
+            new_weight = GAMMA * old + (1 - GAMMA) * weight
+            self.G[src][dst]['weight'] = new_weight
+        else:
+            self.G.add_edge(src, dst, type=etype, weight=weight)
+
+    def prune_with_mrf(self, tau=TAU):
+        removed_nodes = []
+        removed_edges = []
+
+        # ----- Node Scores -----
+        for n in list(self.G.nodes()):
+            freq = self.node_freq[n]
+            score = self.G.nodes[n]['score']
+            final_score = 0.6 * freq + 0.4 * score
+
+            if final_score < tau:
+                self.G.remove_node(n)
+                removed_nodes.append(n)
+
+        # ----- Edge Scores -----
+        for (u, v) in list(self.G.edges()):
+            w = self.G[u][v]['weight']
+            if w < tau:
+                self.G.remove_edge(u, v)
+                removed_edges.append((u, v))
+
+        return removed_nodes, removed_edges
+
+    def summary(self):
+        return {
+            "nodes": self.G.number_of_nodes(),
+            "edges": self.G.number_of_edges(),
+            "types": Counter(self.node_types.values())
+        }

@@ -1,0 +1,50 @@
+MODULE 1 — grok_extractor.py
+(Mock Grok3: Entity & Relation Extractor)
+
+# grok_extractor.py
+import re
+
+class MockGrok3:
+    """
+    Mock implementation of Grok3 (LLM extractor).
+    Extracts entities + relations using simple rules.
+    """
+
+    def __init__(self, entity_keywords=None, relation_patterns=None):
+
+        self.entity_keywords = entity_keywords or {
+            'fever': 'Symptom', 'cough': 'Symptom', 'fatigue': 'Symptom',
+            'diabetes': 'Disease', 'hypertension': 'Disease', 'infection': 'Disease',
+            'insulin': 'Treatment', 'metformin': 'Medication', 'aspirin': 'Medication'
+        }
+
+        self.relation_patterns = relation_patterns or [
+            (r"(\w+) causes (\w+)", 'Causal'),
+            (r"(\w+) treats (\w+)", 'Therapeutic'),
+            (r"(\w+) associated with (\w+)", 'Associative')
+        ]
+
+    def extract(self, text, context=None):
+        """
+        Returns:
+            entities: list of (name, type, confidence)
+            relations: list of (src, dst, type, confidence)
+        """
+        text = text.lower()
+        entities = {}
+        relations = []
+
+        # ----- Entity Extraction -----
+        for word, etype in self.entity_keywords.items():
+            if re.search(r'\b' + re.escape(word) + r'\b', text):
+                score = 0.8
+                entities[word] = (word, etype, score)
+
+        # ----- Relation Extraction -----
+        for patt, rtype in self.relation_patterns:
+            for m in re.finditer(patt, text):
+                a, b = m.group(1), m.group(2)
+                if a in entities and b in entities:
+                    relations.append((a, b, rtype, 0.7))
+
+        return list(entities.values()), relations

@@ -1,0 +1,57 @@
+MODULE 6 — asfa.py
+(Complete ASFA Pipeline)
+
+# asfa.py
+import math
+from grok_extractor import MockGrok3
+from bayes_diagnosis import compute_disease_posterior
+from treatment import recommend_treatments
+
+ALPHA = 1.0
+BETA = 0.7
+TAU = 0.6
+
+def ASFA_pipeline(texts, dkg, priors, patient_symptoms=None, patient_profile=None):
+    grok = MockGrok3()
+
+    candidate_entities = []
+    candidate_relations = []
+
+    # -------- Phase 2: Semantic Extraction --------
+    for t in texts:
+        ents, rels = grok.extract(t)
+
+        for (ename, etype, p_llm) in ents:
+            sim = 0.9 if ename in dkg.G else 0.1
+            conf = 1 / (1 + math.exp(-(ALPHA * p_llm + BETA * sim - 1)))
+            candidate_entities.append((ename, etype, conf))
+
+        for rel in rels:
+            candidate_relations.append(rel)
+
+    # -------- Phase 3: Graph Update --------
+    for ename, etype, conf in candidate_entities:
+        if conf >= TAU:
+            dkg.add_node(ename, etype, initial_score=conf)
+
+    for a, b, rtype, w in candidate_relations:
+        if a in dkg.G and b in dkg.G and w >= TAU:
+            dkg.add_edge(a, b, rtype, w)
+
+    removed_nodes, removed_edges = dkg.prune_with_mrf(tau=TAU)
+
+    # -------- Phase 4: Reasoning --------
+    diagnoses, treatments = {}, {}
+    if patient_symptoms:
+        diagnoses = compute_disease_posterior(dkg, patient_symptoms, priors)
+
+        for disease, prob in diagnoses.items():
+            treatments[disease] = {
+                "prob": prob,
+                "recommend": recommend_treatments(dkg, disease, patient_profile)
+            }
+
+    return dkg, diagnoses, treatments, {
+        "removed_nodes": removed_nodes,
+        "removed_edges": removed_edges
+    }

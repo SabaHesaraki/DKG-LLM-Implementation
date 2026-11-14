@@ -1,0 +1,40 @@
+MODULE 7 — main.py
+(Executable Runner of the Whole System)
+
+# main.py
+from initial_graph import build_initial_dkg
+from asfa import ASFA_pipeline
+
+texts = [
+    "Patient has fever and cough. antibiotic treats infection.",
+    "Type 2 diabetes case. insulin treats diabetes. metformin treats diabetes.",
+]
+
+priors = {
+    "diabetes": 0.05,
+    "hypertension": 0.10,
+    "infection": 0.08
+}
+
+patient = {"age": 72}
+symptoms = ["fever", "cough"]
+
+dkg = build_initial_dkg()
+
+dkg, diagnoses, treatments, info = ASFA_pipeline(
+    texts=texts,
+    dkg=dkg,
+    priors=priors,
+    patient_symptoms=symptoms,
+    patient_profile=patient
+)
+
+print("\n=== Diagnoses ===")
+print(diagnoses)
+
+print("\n=== Treatment Recommendations ===")
+for d, t in treatments.items():
+    print(d, t)
+
+print("\n=== Graph Summary ===")
+print(dkg.summary())
